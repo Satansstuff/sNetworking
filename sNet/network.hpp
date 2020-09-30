@@ -26,7 +26,6 @@ namespace sNet
         if constexpr (Index < Size)
         {
             std::invoke(callable, args..., std::get<Index>(tuple));
-
             if constexpr (Index + 1 < Size)
                 for_each<Index + 1>(
                     std::forward<TTuple>(tuple),
@@ -172,6 +171,7 @@ namespace sNet
         {
             servers.push_back(server());
             return &servers.back();
+
         }
     };
 }

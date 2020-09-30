@@ -10,5 +10,4 @@ int main(void)
     std::cout << std::get<0>(a) << std::endl;
         
     return 0;
-    
 }
