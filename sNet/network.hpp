@@ -73,8 +73,19 @@ namespace sNet
         {
             return true;
         }
-        bool send(unsigned key)
+        template<typename ...Args>
+        bool send(unsigned key, Args... to_send)
         {
+            std::stringstream ss;
+            ss << key << " ";
+            ((ss << to_send << " "), ...);
+            (ss << "<>");
+            auto data = ss.str();
+            return true;
+        }
+        bool send(std::string derp)
+        {
+            derp += "<>";
             return true;
         }
 
@@ -85,6 +96,8 @@ namespace sNet
         bool isRunning = false;
         mutable std::mutex dmutex;
         mutable std::mutex tsend;
+
+
 
         std::unordered_map<unsigned short, client> clients;
         std::unordered_map<unsigned short, std::string> rawdata;
@@ -196,6 +209,44 @@ namespace sNet
             {
                 thr = new std::thread([&]()
                 {
+                    char inbuffer[chunksize];
+                    int sock_h, valread, opt = 1;
+                    struct sockaddr_in address;
+                    auto addrlen = sizeof(address);
+                    if ((sock_h = socket(AF_INET, SOCK_STREAM, 0)) == 0) 
+                    { 
+                        std::cerr << "Failed to open server-socket \n";
+                        isRunning = false;
+                        launched = false;
+                        return;
+                    }
+                    if (setsockopt(sock_h, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, 
+                            &opt, sizeof(opt))) 
+                    { 
+                        std::cerr << "Failed to set sockopt \n";
+                        isRunning = false;
+                        launched = false;
+                        return;
+                    }
+                    address.sin_family = AF_INET; 
+                    address.sin_addr.s_addr = inet_addr(ip);
+                    address.sin_port = htons(port);
+                    if (bind(sock_h, (struct sockaddr *)&address,  
+                        sizeof(address))<0) 
+                    { 
+                        std::cerr << "Failed to bind to IP/PORT \n";
+                        isRunning = false;
+                        launched = false;
+                        return;
+                    }
+                    if (listen(sock_h, 5) < 0) 
+                    { 
+                        std::cerr << "Failed to listen \n";
+                        isRunning = false;
+                        launched = false;
+                        return;
+                    } 
+
                     double updaterate = 1.0 / (tickrate);
                    
                     /*int listenfd = 0, connfd = 0;
@@ -218,15 +269,15 @@ namespace sNet
         {
             isRunning = false;
         }
+        /*
+            TODO:
+                Vilken klient ska detta skickas till? 
+                Alla?
+
+        */
         template<typename... Args>
         void send(unsigned key, Args... to_send)
         {
-            /*
-                TODO:
-                dela upp i chunks om det behövs. 
-                Borde inte vara något problem tbh, 
-                men låt bli att skriva <> om det ska bli längre
-            */
             std::stringstream ss;
             ss << key << " ";
             ((ss << to_send << " "), ...);
