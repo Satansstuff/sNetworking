@@ -8,11 +8,11 @@ int main(void)
             // Dostuff
     }, 5);
     s.send(2, 125, 33, 45.5);
+    s.send(5, 5, 5, 5.5);
     auto a = s.poll<int, int, int, double>(2);
-
+    
     std::cout << std::get<0>(a) << std::endl;
-
-    std::cout << std::get<0>(a) * 2 << std::endl;
-
+    a = s.poll<int, int, int, double>(2);
+    std::cout << std::get<0>(a) << std::endl;
     return 0;
 }

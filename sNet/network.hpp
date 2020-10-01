@@ -29,6 +29,13 @@
 */
 namespace sNet
 {
+    //Defines
+    constexpr char emptypacket[] = "nr";
+    constexpr size_t chunksize = 2048;
+
+
+
+
 
     //https://stackoverflow.com/questions/1198260/how-can-you-iterate-over-the-elements-of-an-stdtuple
     // ^ <3
@@ -58,19 +65,28 @@ namespace sNet
         TCP,
         UDP
     };
-    template<protocol T>
     class client
     {
-        
+
+    public:
+        bool connect(const char* ip, unsigned short port)
+        {
+            return true;
+        }
+        bool send(unsigned key)
+        {
+            return true;
+        }
+
     };
     class server
     {
     private:
         bool isRunning = false;
-        mutable std::mutex mutex;
+        mutable std::mutex dmutex;
         mutable std::mutex tsend;
-        mutable std::mutex remove;
 
+        std::unordered_map<unsigned short, client> clients;
         std::unordered_map<unsigned short, std::string> rawdata;
         std::unordered_map<unsigned short, std::function<void(std::string)>> callbacks;
         std::vector<char*> to_send;
@@ -82,9 +98,10 @@ namespace sNet
             //Returnera C_str?
             //Som i clearData
         
-            std::lock_guard<std::mutex> lock_guard_name(mutex);
+            std::lock_guard<std::mutex> lock_guard_name(dmutex);
             auto raw = rawdata[i];
             auto size = raw.find("<>");
+            if(size == std::string::npos) return std::string(emptypacket);
             return raw.substr(0, size - 1);
         }
         /*
@@ -93,11 +110,11 @@ namespace sNet
         */
         void serverWriteData(int index, char* data)
         {
-            std::lock_guard<std::mutex> lock_guard_name(mutex);
+            std::lock_guard<std::mutex> lock_guard_name(dmutex);
             std::string dat(data);
             std::string work;
             size_t len = 0;
-            size_t itlen = data.length();
+            size_t itlen = dat.length();
             while(dat.length() > 0)
             {
                 
@@ -106,14 +123,19 @@ namespace sNet
                     if(dat[i] == '<' && dat[i + 1] == '>' )
                     {
                         len = i + 2;
+                        work.push_back('<');
+                        work.push_back('>');
                         break;
                     }
                     work.push_back(dat[i]);
                 }
                 dat.erase(0, len);
                 itlen = dat.length();
-                auto key = atoi(work[0]);
-                rawdata[key] = work;
+                auto key = work[0] - '0';
+                if(std::isdigit(key))
+                {
+                    rawdata[key] += work;
+                }
                 work.clear();
             }
 
@@ -127,22 +149,24 @@ namespace sNet
         }
         void clearData(unsigned index)
         {
-            std::lock_guard<std::mutex> lock_guard_name(remove);
-            /*bool data = rawdata[index].size() > 0;
-            if(auto pos = rawdata[index].find("<>") != std::string::npos)
+            std::lock_guard<std::mutex> lock_guard_name(dmutex);
+            if(rawdata[index].size() == 0) return;
+            size_t packet = rawdata[index].find("<>");
+            if(packet != std::string::npos)
             {
-                rawdata[index].erase(0, pos - 1);
-                return;
+                rawdata[index].erase(0, packet + 2);
             }
-            if(data) rawdata[index].erase();*/
-            rawdata[index].clear();
+            /*else
+            {
+                Potential vuln 
+                rawdata[index].clear();
+            }*/
         }
     public:
         server(const server &other)
         {
-            std::lock_guard<std::mutex>(other.mutex);
+            std::lock_guard<std::mutex>(other.dmutex);
             std::lock_guard<std::mutex>(other.tsend);
-            std::lock_guard<std::mutex>(other.remove);
         }
         server()
         {
@@ -150,7 +174,7 @@ namespace sNet
         }
         size_t getWaitingData(unsigned index)
         {
-            std::lock_guard<std::mutex> lock_guard_name(mutex);
+            std::lock_guard<std::mutex> lock_guard_name(dmutex);
             auto data = rawdata[index];
             size_t counter = 0;
             size_t start = 0;
@@ -167,29 +191,28 @@ namespace sNet
         template<protocol s>
         bool launch(unsigned short port, const char* ip = "0.0.0.0", unsigned short tickrate = 64)
         {
-            using namespace std::chrono_literals;
+            bool launched = false;
             if constexpr(s == TCP)
             {
                 thr = new std::thread([&]()
                 {
-                    double sleeprate = 1.0 / (tickrate);
+                    double updaterate = 1.0 / (tickrate);
                    
                     /*int listenfd = 0, connfd = 0;
                     struct sockaddr_in serv_addr;
                     auto listenfd = socket(AF_INET, SOCK_STREAM, 0);*/
                     while(isRunning)
                     {
-                        std::this_thread::sleep_for(std::chrono::seconds(sleeprate));
+                        std::this_thread::sleep_for(std::chrono::seconds(updaterate));
                     }
                 });
                 thr->detach();
-                
             }
             else
             {
                 
             }
-            return true;
+            return launched;
         }
         inline void shutDown()
         {
@@ -207,14 +230,11 @@ namespace sNet
             std::stringstream ss;
             ss << key << " ";
             ((ss << to_send << " "), ...);
-            if(sizeof(ss.str()) < 1024)
-            {
-                (ss << "<>");
-            }
+            (ss << "<>");
             auto data = ss.str();
-            std::cout << data << std::endl;
+            //std::cout << data << std::endl;
             addToSend((char*)data.c_str());
-            rawdata[2] = data;
+            rawdata[2] += data;
         }
         template <typename... Ts>
         std::tuple<Ts...> poll(short i)
