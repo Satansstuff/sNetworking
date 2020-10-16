@@ -9,10 +9,12 @@
 #include <thread>
 #include <numeric>
 #include <chrono>
+#include <deque>
 
-#include <sys/socket.h>
-#include <netinet/in.h>
 #include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -33,7 +35,15 @@ namespace sNet
     constexpr char emptypacket[] = "nr";
     constexpr size_t chunksize = 2048;
 
-
+    /*struct net_error
+    {
+        std::string error = "";
+        bool fatal = false;
+        bool operator()()
+        {
+            return fatal;
+        }
+    };*/
 
 
 
@@ -67,26 +77,161 @@ namespace sNet
     };
     class client
     {
-
-    public:
-        bool connect(const char* ip, unsigned short port)
+        int sock = 0, valread = 0;
+        struct sockaddr_in serv_addr;
+        char buffer[chunksize + 1];
+        bool initialized = false;
+        mutable std::mutex dmutex;
+        std::unordered_map<unsigned short, const char *> rawdata;
+        struct hostent *hostinfo;
+        auto GetData(unsigned i) &
         {
+            //Måste veta om det inns mer än ett paket där
+            //Returnera C_str?
+            //Som i clearData
+        
+            std::lock_guard<std::mutex> lock_guard_name(dmutex);
+            auto raw = rawdata[i];
+            auto size = raw.find("<>");
+            if(size == std::string::npos) return std::string(emptypacket);
+            return raw.substr(0, size - 1);
+        }
+        void ClearData(unsigned index)
+        {
+            std::lock_guard<std::mutex> lock_guard_name(dmutex);
+            if(rawdata[index].size() == 0) return;
+            size_t packet = rawdata[index].find("<>");
+            if(packet != std::string::npos)
+            {
+                rawdata[index].erase(0, packet + 2);
+            }
+            /*else
+            {
+                Potential vuln 
+                rawdata[index].clear();
+            }*/
+        }
+        size_t GetLen(const char *ptr)
+        {
+            size_t size = 0;
+            while(ptr[0] != '>') size++;
+            return size; 
+        }
+        bool Internal_send(unsigned short key, const char* ptr)
+        {
+            /*
+                Skicka i chunks ist?
+            */
+            size_t size = GetLen(ptr);
+            /*if(size <= chunksize)
+            {
+                if( send(sock , buffer, size , 0) < 0)
+                {
+                    std::cerr << "failed to send\n";
+                    return false;
+                }
+            }
+            else
+            {
+                
+            }*/
+            /*
+                chuuuunks
+
+            */
+            if(size < chunksize)
+            {
+                if( send(sock , ptr, size , 0) < 0)
+                {
+                        std::cerr << "failed to send\n";
+                        return false;
+                }
+                return true;
+            }
+            while(size > 0)
+            {
+                size_t sendsize = abs(size - chunksize);
+                if( send(sock , ptr, sendsize , 0) < 0)
+                {
+                    std::cerr << "failed to send\n";
+                    return false;
+                }
+                ptr += sendsize;
+                size -= sendsize;
+            }
+
             return true;
         }
+        bool Init(std::string &ip, unsigned short &port)
+        {
+            if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) 
+            { 
+                std::cerr << "Failed to create client socket\n";
+                return false; 
+            }
+            /*
+                TODO Implementera IPv6
+            */
+            bzero((char *) &serv_addr, sizeof(serv_addr));
+            serv_addr.sin_family = AF_INET;
+            serv_addr.sin_addr.s_addr = inet_addr(ip.c_str());
+            inet_aton(ip.c_str(), &serv_addr.sin_addr);
+            serv_addr.sin_port = htons(port);
+            return true;
+        }
+    public:
+
+        client() = default;
+        client(std::string ip, unsigned short port)
+        {
+            Init(ip, port) ? initialized = true : initialized = false;
+        }
+        client(int desc)
+        {
+            
+        }
+        bool Connect(std::string ip = "", unsigned short port = 8080)
+        {
+            if(!initialized)
+            {
+                initialized = Init(ip,port);
+                if(!initialized) return false;
+            }
+            if (connect(sock , (struct sockaddr *)&serv_addr , sizeof(serv_addr)) < 0)
+            {
+                std::cerr << "Failed to connect\n";
+                return false;
+            }
+        }
         template<typename ...Args>
-        bool send(unsigned key, Args... to_send)
+        bool Send(unsigned key, Args... to_send)
         {
             std::stringstream ss;
             ss << key << " ";
             ((ss << to_send << " "), ...);
             (ss << "<>");
             auto data = ss.str();
-            return true;
+            return Internal_send(key, data.c_str());
         }
-        bool send(std::string derp)
+        bool Send(unsigned short key, std::string derp)
         {
             derp += "<>";
-            return true;
+            return Internal_send(key, derp.c_str());
+        }
+        template <typename... Ts>
+        std::tuple<Ts...> Poll(short i)
+        {
+            std::tuple<Ts...> ret;
+            if(GetData(i).empty()) return ret;
+            std::string parse(GetData(i));
+            std::istringstream ss(parse);
+            for_each(ret, [&](auto& item) 
+            {
+                ss >> item;
+            });
+            //Hmmmm?
+            ClearData(i);
+            return ret;
         }
 
     };
@@ -105,7 +250,7 @@ namespace sNet
         std::vector<char*> to_send;
         std::thread *thr = nullptr;
 
-        auto getData(unsigned i) &
+        auto GetData(unsigned i) &
         {
             //Måste veta om det inns mer än ett paket där
             //Returnera C_str?
@@ -121,7 +266,7 @@ namespace sNet
             Untested af
 
         */
-        void serverWriteData(int index, char* data)
+        void ServerWriteData(int index, char* data)
         {
             std::lock_guard<std::mutex> lock_guard_name(dmutex);
             std::string dat(data);
@@ -155,12 +300,12 @@ namespace sNet
             // Hitta antalet paket och dela upp dem till rätt ställe
 
         }
-        void addToSend(char* data)
+        void AddToSend(char* data)
         {
             std::lock_guard<std::mutex> lock_guard_name(tsend);
             to_send.push_back(data);
         }
-        void clearData(unsigned index)
+        void ClearData(unsigned index)
         {
             std::lock_guard<std::mutex> lock_guard_name(dmutex);
             if(rawdata[index].size() == 0) return;
@@ -175,6 +320,7 @@ namespace sNet
                 rawdata[index].clear();
             }*/
         }
+
     public:
         server(const server &other)
         {
@@ -185,7 +331,7 @@ namespace sNet
         {
             srand(time(NULL));
         }
-        size_t getWaitingData(unsigned index)
+        size_t GetWaitingData(unsigned index)
         {
             std::lock_guard<std::mutex> lock_guard_name(dmutex);
             auto data = rawdata[index];
@@ -202,7 +348,7 @@ namespace sNet
             return counter;
         }
         template<protocol s>
-        bool launch(unsigned short port, const char* ip = "0.0.0.0", unsigned short tickrate = 64)
+        bool Launch(unsigned short port, const char* ip = "0.0.0.0", unsigned short tickrate = 64)
         {
             bool launched = false;
             if constexpr(s == TCP)
@@ -265,7 +411,7 @@ namespace sNet
             }
             return launched;
         }
-        inline void shutDown()
+        inline void ShutDown()
         {
             isRunning = false;
         }
@@ -276,7 +422,7 @@ namespace sNet
 
         */
         template<typename... Args>
-        void send(unsigned key, Args... to_send)
+        void Send(unsigned key, Args... to_send)
         {
             std::stringstream ss;
             ss << key << " ";
@@ -284,27 +430,27 @@ namespace sNet
             (ss << "<>");
             auto data = ss.str();
             //std::cout << data << std::endl;
-            addToSend((char*)data.c_str());
+            AddToSend((char*)data.c_str());
             rawdata[2] += data;
         }
         template <typename... Ts>
-        std::tuple<Ts...> poll(short i)
+        std::tuple<Ts...> Poll(short i)
         {
             std::tuple<Ts...> ret;
             //auto size = std::tuple_size<decltype(ret)>::value;
             if(callbacks.find(i) != callbacks.end() || 
-                getData(i).empty()) return ret;
-            std::string parse(getData(i));
+                GetData(i).empty()) return ret;
+            std::string parse(GetData(i));
             std::istringstream ss(parse);
             for_each(ret, [&](auto& item) 
             {
                 ss >> item;
             });
             //Hmmmm?
-            clearData(i);
+            ClearData(i);
             return ret;
         }
-        inline void registerHandle(std::function<void(std::string)> func, short key)
+        inline void RegisterHandle(std::function<void(std::string)> func, short key)
         {
             if(callbacks.find(key) != callbacks.end()) callbacks[key] = func;
         }
@@ -323,7 +469,7 @@ namespace sNet
     private:
         std::vector<server> servers;
     public:
-        auto addServer()
+        auto AddServer()
         {
             servers.push_back(server());
             return &servers.back();
