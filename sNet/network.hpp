@@ -10,6 +10,9 @@
 #include <numeric>
 #include <chrono>
 #include <deque>
+#include <algorithm>
+#include <execution>
+#include <future>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -33,7 +36,7 @@ namespace sNet
 {
     //Defines
     constexpr char emptypacket[] = "nr";
-    constexpr size_t chunksize = 2048;
+    constexpr unsigned chunksize = 2048;
 
     /*struct net_error
     {
@@ -79,10 +82,13 @@ namespace sNet
     {
         int sock = 0, valread = 0;
         struct sockaddr_in serv_addr;
-        char buffer[chunksize + 1];
+        /*
+            std string blir mycket realloc
+        */
+        std::string buffer;
         bool initialized = false;
         mutable std::mutex dmutex;
-        std::unordered_map<unsigned short, const char *> rawdata;
+        std::unordered_map<unsigned short, std::string> rawdata;
         struct hostent *hostinfo;
         auto GetData(unsigned i) &
         {
@@ -103,7 +109,7 @@ namespace sNet
             size_t packet = rawdata[index].find("<>");
             if(packet != std::string::npos)
             {
-                rawdata[index].erase(0, packet + 2);
+                rawdata[index].erase(0, packet + 1);
             }
             /*else
             {
@@ -111,59 +117,28 @@ namespace sNet
                 rawdata[index].clear();
             }*/
         }
-        size_t GetLen(const char *ptr)
-        {
-            size_t size = 0;
-            while(ptr[0] != '>') size++;
-            return size; 
-        }
-        bool Internal_send(unsigned short key, const char* ptr)
-        {
-            /*
-                Skicka i chunks ist?
-            */
-            size_t size = GetLen(ptr);
-            /*if(size <= chunksize)
-            {
-                if( send(sock , buffer, size , 0) < 0)
-                {
-                    std::cerr << "failed to send\n";
-                    return false;
-                }
-            }
-            else
-            {
-                
-            }*/
-            /*
-                chuuuunks
 
-            */
-            if(size < chunksize)
+        /*
+            Not threadsafe... One client per thread pl0x
+        */
+        bool Internal_send(unsigned short key, std::string &data)
+        {
+            for(unsigned i = 0; i < data.size(); i++)
             {
-                if( send(sock , ptr, size , 0) < 0)
+                buffer[i] = data[i];
+                if(buffer.size() > chunksize)
                 {
-                        std::cerr << "failed to send\n";
-                        return false;
+                    send(sock , buffer.c_str() , buffer.length() , 0 ); 
+                    buffer.clear();
                 }
-                return true;
             }
-            while(size > 0)
-            {
-                size_t sendsize = abs(size - chunksize);
-                if( send(sock , ptr, sendsize , 0) < 0)
-                {
-                    std::cerr << "failed to send\n";
-                    return false;
-                }
-                ptr += sendsize;
-                size -= sendsize;
-            }
-
+            ClearData(key);
             return true;
         }
+        
         bool Init(std::string &ip, unsigned short &port)
         {
+            buffer = std::string(chunksize);
             if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) 
             { 
                 std::cerr << "Failed to create client socket\n";
@@ -211,12 +186,12 @@ namespace sNet
             ((ss << to_send << " "), ...);
             (ss << "<>");
             auto data = ss.str();
-            return Internal_send(key, data.c_str());
+            return Internal_send(key, data);
         }
         bool Send(unsigned short key, std::string derp)
         {
-            derp += "<>";
-            return Internal_send(key, derp.c_str());
+            derp += " <>";
+            return Internal_send(key, derp);
         }
         template <typename... Ts>
         std::tuple<Ts...> Poll(short i)
@@ -246,7 +221,7 @@ namespace sNet
 
         std::unordered_map<unsigned short, client> clients;
         std::unordered_map<unsigned short, std::string> rawdata;
-        std::unordered_map<unsigned short, std::function<void(std::string)>> callbacks;
+        std::unordered_map<unsigned short, std::function<void()>> callbacks;
         std::vector<char*> to_send;
         std::thread *thr = nullptr;
 
@@ -431,15 +406,73 @@ namespace sNet
             auto data = ss.str();
             //std::cout << data << std::endl;
             AddToSend((char*)data.c_str());
-            rawdata[2] += data;
+
+            // Detta ska bort när klienten är klar
+            rawdata[key] += data;
+        }
+        template<typename T>
+        void Send(unsigned key, std::vector<T> to_send)
+        {
+            std::stringstream ss;
+            ss << key << " ";
+            ss << to_send.size() << " ";
+            std::ostringstream oss;
+            if(to_send.size() > 500)
+            {
+                std::copy(std::execution::par, to_send.begin(), to_send.end(), 
+                    std::ostream_iterator<T>(oss, " "));
+            }
+            else
+            {
+                std::copy(std::execution::seq, to_send.begin(), to_send.end(), 
+                    std::ostream_iterator<T>(oss, " "));
+            }
+            
+            
+            ss << oss.str();
+            ss << "<>";
+            auto data = ss.str();
+            AddToSend((char*)data.c_str());
+
+            // Detta ska bort när klienten är klar
+            rawdata[key] += data;
+        }
+        template <typename T>
+        std::vector<T> PollVec(short i)
+        {
+            std::vector<T> ret;
+            auto data = GetData(i);
+            std::istringstream ostrm(data);
+            short key;
+            size_t len;
+            ostrm >> key;
+            ostrm >> len;
+            ret.resize(len);
+
+            if(len > 500)
+            {
+                std::copy(std::execution::par, std::istream_iterator<T>(ostrm), std::istream_iterator<T>(),
+                    ret.begin());
+            }
+            else
+            {
+                std::copy(std::execution::seq, std::istream_iterator<T>(ostrm), std::istream_iterator<T>(),
+                    ret.begin());
+            }
+            {
+                data = GetData(i);
+                std::lock_guard<std::mutex> lock_guard_name(dmutex);
+                data += " <>";
+            }
+            ClearData(i);
+
+            return ret;
         }
         template <typename... Ts>
         std::tuple<Ts...> Poll(short i)
         {
             std::tuple<Ts...> ret;
             //auto size = std::tuple_size<decltype(ret)>::value;
-            if(callbacks.find(i) != callbacks.end() || 
-                GetData(i).empty()) return ret;
             std::string parse(GetData(i));
             std::istringstream ss(parse);
             for_each(ret, [&](auto& item) 
@@ -450,8 +483,9 @@ namespace sNet
             ClearData(i);
             return ret;
         }
-        inline void RegisterHandle(std::function<void(std::string)> func, short key)
+        inline void RegisterHandle(std::function<void()> func, short key)
         {
+            
             if(callbacks.find(key) != callbacks.end()) callbacks[key] = func;
         }
         ~server()
