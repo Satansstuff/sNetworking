@@ -109,7 +109,7 @@ namespace sNet
             size_t packet = rawdata[index].find("<>");
             if(packet != std::string::npos)
             {
-                rawdata[index].erase(0, packet + 2);
+                rawdata[index].erase(0, packet + 1);
             }
             /*else
             {
@@ -128,16 +128,17 @@ namespace sNet
                 buffer[i] = data[i];
                 if(buffer.size() > chunksize)
                 {
-                    // send;
+                    send(sock , buffer.c_str() , buffer.length() , 0 ); 
                     buffer.clear();
                 }
             }
+            ClearData(key);
             return true;
         }
         
         bool Init(std::string &ip, unsigned short &port)
         {
-            buffer = std::string(chunksize, '0');
+            buffer = std::string(chunksize);
             if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) 
             { 
                 std::cerr << "Failed to create client socket\n";
@@ -189,7 +190,7 @@ namespace sNet
         }
         bool Send(unsigned short key, std::string derp)
         {
-            derp += "<>";
+            derp += " <>";
             return Internal_send(key, derp);
         }
         template <typename... Ts>
@@ -220,7 +221,7 @@ namespace sNet
 
         std::unordered_map<unsigned short, client> clients;
         std::unordered_map<unsigned short, std::string> rawdata;
-        std::unordered_map<unsigned short, std::function<void(std::string)>> callbacks;
+        std::unordered_map<unsigned short, std::function<void()>> callbacks;
         std::vector<char*> to_send;
         std::thread *thr = nullptr;
 
@@ -416,7 +417,18 @@ namespace sNet
             ss << key << " ";
             ss << to_send.size() << " ";
             std::ostringstream oss;
-            std::copy(std::execution::par, to_send.begin(), to_send.end(), std::ostream_iterator<T>(oss, " "));
+            if(to_send.size() > 500)
+            {
+                std::copy(std::execution::par, to_send.begin(), to_send.end(), 
+                    std::ostream_iterator<T>(oss, " "));
+            }
+            else
+            {
+                std::copy(std::execution::seq, to_send.begin(), to_send.end(), 
+                    std::ostream_iterator<T>(oss, " "));
+            }
+            
+            
             ss << oss.str();
             ss << "<>";
             auto data = ss.str();
@@ -435,8 +447,25 @@ namespace sNet
             size_t len;
             ostrm >> key;
             ostrm >> len;
-            std::copy(std::execution::par, std::istream_iterator<T>(ostrm), std::istream_iterator<T>(),
-                std::back_inserter(ret));
+            ret.resize(len);
+
+            if(len > 500)
+            {
+                std::copy(std::execution::par, std::istream_iterator<T>(ostrm), std::istream_iterator<T>(),
+                    ret.begin());
+            }
+            else
+            {
+                std::copy(std::execution::seq, std::istream_iterator<T>(ostrm), std::istream_iterator<T>(),
+                    ret.begin());
+            }
+            {
+                data = GetData(i);
+                std::lock_guard<std::mutex> lock_guard_name(dmutex);
+                data += " <>";
+            }
+            ClearData(i);
+
             return ret;
         }
         template <typename... Ts>
@@ -444,8 +473,6 @@ namespace sNet
         {
             std::tuple<Ts...> ret;
             //auto size = std::tuple_size<decltype(ret)>::value;
-            if(callbacks.find(i) != callbacks.end() || 
-                GetData(i).empty()) return ret;
             std::string parse(GetData(i));
             std::istringstream ss(parse);
             for_each(ret, [&](auto& item) 
@@ -456,8 +483,9 @@ namespace sNet
             ClearData(i);
             return ret;
         }
-        inline void RegisterHandle(std::function<void(std::string)> func, short key)
+        inline void RegisterHandle(std::function<void()> func, short key)
         {
+            
             if(callbacks.find(key) != callbacks.end()) callbacks[key] = func;
         }
         ~server()
